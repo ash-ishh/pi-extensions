@@ -1,18 +1,32 @@
 {
-  "name": "pi-query-time-footer",
+  "name": "pi-extensions",
   "version": "0.1.0",
-  "description": "Pi package that shows the latest query duration in the footer",
-  "keywords": ["pi-package", "pi", "pi-extension", "footer"],
+  "description": "Ashish's Pi extensions",
   "license": "MIT",
+  "private": false,
   "type": "module",
-  "files": [
-    "extensions",
-    "README.md"
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ash-ishh/pi-extensions.git"
+  },
+  "author": "Ashish",
+  "bugs": {
+    "url": "https://github.com/ash-ishh/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ash-ishh/pi-extensions#readme",
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./query-time-footer/extensions/query-time-footer.ts",
+      "./pi-openai-fast/extensions/index.ts"
+    ]
   }
 }

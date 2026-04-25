@@ -1,0 +1,27 @@
+{
+  "name": "@ash-ishh/pi-query-time-footer",
+  "version": "0.1.0",
+  "description": "Pi extension that shows the latest query duration in the footer",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "footer"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ash-ishh/pi-extensions.git",
+    "directory": "query-time-footer"
+  },
+  "author": "Ashish",
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/query-time-footer.ts"
+    ]
+  }
+}
