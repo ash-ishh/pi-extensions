@@ -39,7 +39,7 @@ Define a shortcut, then type it in any prompt:
 @project_context write a launch announcement for the new dashboard
 ```
 
-The extension loads the configured file(s) into hidden context before the model runs. It also adds autocomplete suggestions for configured aliases when you type `@`.
+The extension loads the configured file(s) into hidden context before the model runs, while your visible prompt stays short. It also adds autocomplete suggestions for configured aliases when you type `@`.
 
 Run `/context-shortcuts` in Pi to list loaded shortcuts and config paths.
 

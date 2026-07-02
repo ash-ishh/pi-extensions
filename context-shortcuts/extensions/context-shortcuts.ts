@@ -347,21 +347,6 @@ export default function contextShortcuts(pi: ExtensionAPI): void {
 		}));
 	});
 
-	pi.on("input", async (event, ctx) => {
-		if (event.source === "extension" || ctx.isIdle()) {
-			return { action: "continue" };
-		}
-
-		const expansion = expandShortcutsForText(event.text, ctx);
-		if (!expansion) return { action: "continue" };
-		notifyExpansion(ctx, expansion);
-		return {
-			action: "transform",
-			text: `${event.text}\n\n${expansion.content}`,
-			images: event.images,
-		};
-	});
-
 	pi.on("before_agent_start", async (event, ctx) => {
 		const expansion = expandShortcutsForText(event.prompt, ctx);
 		if (!expansion) return undefined;
