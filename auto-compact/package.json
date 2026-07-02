@@ -1,19 +1,21 @@
 {
-  "name": "@ash-ishh/pi-query-time-footer",
+  "name": "@ash-ishh/pi-auto-compact",
   "version": "0.1.0",
-  "description": "Pi extension that shows the latest query duration in the footer",
+  "description": "Pi extension that triggers default compaction at 60% context usage",
   "keywords": [
     "pi-package",
     "pi",
     "pi-extension",
-    "footer"
+    "auto-compact",
+    "compaction",
+    "context-window"
   ],
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ash-ishh/pi-extensions.git",
-    "directory": "query-time-footer"
+    "directory": "auto-compact"
   },
   "author": "Ashish",
   "peerDependencies": {
@@ -21,7 +23,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/query-time-footer.ts"
+      "./extensions/auto-compact.ts"
     ]
   }
 }

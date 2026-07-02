@@ -21,12 +21,14 @@
   },
   "homepage": "https://github.com/ash-ishh/pi-extensions#readme",
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
     "extensions": [
       "./query-time-footer/extensions/query-time-footer.ts",
-      "./pi-openai-fast/extensions/index.ts"
+      "./pi-openai-fast/extensions/index.ts",
+      "./auto-compact/extensions/auto-compact.ts",
+      "./context-shortcuts/extensions/context-shortcuts.ts"
     ]
   }
 }
