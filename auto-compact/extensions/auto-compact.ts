@@ -5,10 +5,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const COMMAND_NAME = "auto-compact";
 const CONFIG_BASENAME = "pi-auto-compact.json";
-const AUTO_COMPACT_PERCENT = 60;
+const DEFAULT_THRESHOLD_PERCENT = 60;
+const MIN_THRESHOLD_PERCENT = 1;
+const MAX_THRESHOLD_PERCENT = 95;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_COMPACT_INSTRUCTIONS =
-	"Auto-compaction triggered at 60% context usage. Preserve the current task, recent work, key decisions, active files, blockers, and next steps.";
+	"Auto-compaction triggered because context usage crossed the configured threshold. Preserve the current task, recent work, key decisions, active files, blockers, and next steps.";
 
 const FOLLOW_UP_BY_PHASE = {
 	"pre-turn": "Auto-compact ran before this turn. Continue with the current user request.",
@@ -21,11 +23,13 @@ type CompactPhase = AutoCompactPhase | "manual";
 
 interface AutoCompactConfigFile {
 	enabled?: boolean;
+	thresholdPercent?: number;
 }
 
 interface ResolvedAutoCompactConfig {
 	configPath: string;
 	enabled: boolean;
+	thresholdPercent: number;
 }
 
 interface UsageSnapshot {
@@ -33,14 +37,36 @@ interface UsageSnapshot {
 	contextWindow: number;
 	limit: number;
 	percent: number | null;
+	thresholdPercent: number;
 }
 
 const DEFAULT_CONFIG: Required<AutoCompactConfigFile> = {
 	enabled: true,
+	thresholdPercent: DEFAULT_THRESHOLD_PERCENT,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeThresholdPercent(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	if (value < MIN_THRESHOLD_PERCENT || value > MAX_THRESHOLD_PERCENT) return undefined;
+	return Math.round(value * 10) / 10;
+}
+
+function parseThresholdPercent(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const parsed = Number(value.trim().replace(/%$/, ""));
+	return normalizeThresholdPercent(parsed);
+}
+
+function formatPercent(percent: number): string {
+	return Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(1)}%`;
+}
+
+function computeLimit(contextWindow: number, thresholdPercent: number): number {
+	return Math.floor(contextWindow * thresholdPercent / 100);
 }
 
 function getConfigPaths(
@@ -63,6 +89,8 @@ function readConfigFile(filePath: string): AutoCompactConfigFile | null {
 		if (!isRecord(parsed)) return {};
 		const config: AutoCompactConfigFile = {};
 		if (typeof parsed.enabled === "boolean") config.enabled = parsed.enabled;
+		const thresholdPercent = normalizeThresholdPercent(parsed.thresholdPercent);
+		if (thresholdPercent !== undefined) config.thresholdPercent = thresholdPercent;
 		return config;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -98,6 +126,7 @@ function resolveAutoCompactConfig(cwd: string, homeDir: string = homedir()): Res
 	return {
 		configPath: selectedConfigPath,
 		enabled: merged.enabled ?? DEFAULT_CONFIG.enabled,
+		thresholdPercent: merged.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent,
 	};
 }
 
@@ -125,13 +154,18 @@ export default function autoCompact(pi: ExtensionAPI): void {
 	let pendingCompaction = false;
 	let lastKnownTokens: number | null = null;
 	let cachedContextWindow = DEFAULT_CONTEXT_WINDOW;
-	let cachedLimit = Math.floor(DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_PERCENT / 100);
 	let cachedConfig: ResolvedAutoCompactConfig | undefined;
+	let cachedLimit = computeLimit(DEFAULT_CONTEXT_WINDOW, DEFAULT_CONFIG.thresholdPercent);
 	let triggerCount = 0;
 	let lastTrigger: string | null = null;
 
+	function recomputeCachedLimit(): void {
+		cachedLimit = computeLimit(cachedContextWindow, cachedConfig?.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent);
+	}
+
 	function refreshConfig(ctx: ExtensionContext): ResolvedAutoCompactConfig {
 		cachedConfig = resolveAutoCompactConfig(getConfigCwd(ctx));
+		recomputeCachedLimit();
 		return cachedConfig;
 	}
 
@@ -147,10 +181,31 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		notify(ctx, `Auto-compact is now ${enabled ? "enabled" : "disabled"}.`, "info");
 	}
 
+	function setThresholdPercent(ctx: ExtensionContext, thresholdPercent: number): void {
+		const config = refreshConfig(ctx);
+		const nextConfig = { ...(readConfigFile(config.configPath) ?? {}), thresholdPercent };
+		writeConfigFile(config.configPath, nextConfig);
+		cachedConfig = { ...config, thresholdPercent };
+		recomputeCachedLimit();
+		notify(
+			ctx,
+			`Auto-compact threshold set to ${formatPercent(thresholdPercent)} (${formatTokens(cachedLimit)} tokens for current model).`,
+			"info",
+		);
+	}
+
+	function resetConfig(ctx: ExtensionContext): void {
+		const config = refreshConfig(ctx);
+		writeConfigFile(config.configPath, DEFAULT_CONFIG);
+		cachedConfig = { configPath: config.configPath, ...DEFAULT_CONFIG };
+		recomputeCachedLimit();
+		notify(ctx, `Auto-compact reset to enabled at ${formatPercent(DEFAULT_CONFIG.thresholdPercent)}.`, "info");
+	}
+
 	function updateLimits(contextWindow: number | undefined): void {
 		if (!contextWindow || contextWindow <= 0 || contextWindow === cachedContextWindow) return;
 		cachedContextWindow = contextWindow;
-		cachedLimit = Math.floor(cachedContextWindow * AUTO_COMPACT_PERCENT / 100);
+		recomputeCachedLimit();
 	}
 
 	function getUsage(ctx: ExtensionContext): UsageSnapshot {
@@ -162,12 +217,14 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		}
 
 		const tokens = usage?.tokens ?? lastKnownTokens;
+		const thresholdPercent = cachedConfig?.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent;
 		const percent = usage?.percent ?? (tokens === null ? null : (tokens / cachedContextWindow) * 100);
 		return {
 			tokens,
 			contextWindow: cachedContextWindow,
 			limit: cachedLimit,
 			percent,
+			thresholdPercent,
 		};
 	}
 
@@ -198,7 +255,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		const usage = getUsage(ctx);
 		notify(
 			ctx,
-			`Auto-compact started (${phase}; ${formatTokens(usage.tokens)} / ${formatTokens(usage.contextWindow)} tokens, threshold ${AUTO_COMPACT_PERCENT}%).`,
+			`Auto-compact started (${phase}; ${formatTokens(usage.tokens)} / ${formatTokens(usage.contextWindow)} tokens, threshold ${formatPercent(usage.thresholdPercent)}).`,
 			"info",
 		);
 
@@ -258,9 +315,9 @@ export default function autoCompact(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Enable, disable, show status, or manually run default pi compaction at 60% context usage",
+		description: "Configure auto-compaction, show status, or manually run default pi compaction",
 		getArgumentCompletions: (prefix) => {
-			const commands = ["on", "off", "status", "now"];
+			const commands = ["on", "off", "status", "threshold", "now", "reset"];
 			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value }));
 			return items.length > 0 ? items : null;
 		},
@@ -278,6 +335,24 @@ export default function autoCompact(pi: ExtensionAPI): void {
 				return;
 			}
 
+			if (command === "threshold") {
+				const thresholdPercent = parseThresholdPercent(rest[0]);
+				if (thresholdPercent === undefined) {
+					ctx.ui.notify(
+						`Usage: /${COMMAND_NAME} threshold <${MIN_THRESHOLD_PERCENT}-${MAX_THRESHOLD_PERCENT}>`,
+						"warning",
+					);
+					return;
+				}
+				setThresholdPercent(ctx, thresholdPercent);
+				return;
+			}
+
+			if (command === "reset") {
+				resetConfig(ctx);
+				return;
+			}
+
 			if (command === "status") {
 				const config = refreshConfig(ctx);
 				const usage = getUsage(ctx);
@@ -285,9 +360,10 @@ export default function autoCompact(pi: ExtensionAPI): void {
 				ctx.ui.notify(
 					`Auto Compact Status:\n` +
 						`  Enabled: ${config.enabled ? "yes" : "no"}\n` +
+						`  Threshold: ${formatPercent(config.thresholdPercent)}\n` +
 						`  Current tokens: ${formatTokens(usage.tokens)}\n` +
 						`  Context window: ${formatTokens(usage.contextWindow)}\n` +
-						`  Trigger at: ${formatTokens(usage.limit)} (${AUTO_COMPACT_PERCENT}%)\n` +
+						`  Trigger at: ${formatTokens(usage.limit)} tokens\n` +
 						`  Usage: ${percent}\n` +
 						`  Pending: ${pendingCompaction}\n` +
 						`  Trigger count: ${triggerCount}\n` +
@@ -304,7 +380,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 				return;
 			}
 
-			ctx.ui.notify(`Usage: /${COMMAND_NAME} [on|off|status|now [instructions...]]`, "warning");
+			ctx.ui.notify(`Usage: /${COMMAND_NAME} [on|off|status|threshold <percent>|now [instructions...]|reset]`, "warning");
 		},
 	});
 }
@@ -312,13 +388,17 @@ export default function autoCompact(pi: ExtensionAPI): void {
 export const _test = {
 	COMMAND_NAME,
 	CONFIG_BASENAME,
-	AUTO_COMPACT_PERCENT,
+	DEFAULT_THRESHOLD_PERCENT,
+	MIN_THRESHOLD_PERCENT,
+	MAX_THRESHOLD_PERCENT,
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_CONFIG,
 	DEFAULT_COMPACT_INSTRUCTIONS,
 	getConfigPaths,
 	readConfigFile,
 	resolveAutoCompactConfig,
+	parseThresholdPercent,
+	formatPercent,
 	formatTokens,
 	hasToolCalls,
 };

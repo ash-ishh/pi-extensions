@@ -1,7 +1,7 @@
 {
   "name": "@ash-ishh/pi-auto-compact",
   "version": "0.1.0",
-  "description": "Pi extension that triggers default compaction at 60% context usage",
+  "description": "Pi extension that triggers default compaction at a configurable context-usage threshold",
   "keywords": [
     "pi-package",
     "pi",

@@ -8,7 +8,7 @@ Personal extensions for the [Pi coding agent](https://github.com/badlogic/pi-mon
 |-----------|-------------|
 | [query-time-footer](query-time-footer/) | Show the active query number and latest query duration in Pi's footer. Adds `/query-time`. |
 | [pi-openai-fast](pi-openai-fast/) | `/fast` toggle for OpenAI priority service tier on configured models. Copied/forked from [`@benvargas/pi-openai-fast`](https://github.com/ben-vargas/pi-packages/tree/main/packages/pi-openai-fast) by Ben Vargas. |
-| [auto-compact](auto-compact/) | Run Pi's default compaction automatically at 60% context usage. Adds `/auto-compact on|off|status|now`. |
+| [auto-compact](auto-compact/) | Run Pi's default compaction automatically at a configurable context threshold (default 60%). Adds `/auto-compact on|off|status|threshold|now`. |
 | [context-shortcuts](context-shortcuts/) | Expand global `@...` aliases like `@videodb_context` into hidden context files. Adds `/context-shortcuts`. |
 
 ## Install (pi package manager)
@@ -43,7 +43,7 @@ For OpenAI fast only:
 }
 ```
 
-For auto-compact at 60% only:
+For auto-compact only:
 
 ```json
 {

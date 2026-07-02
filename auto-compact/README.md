@@ -1,8 +1,8 @@
 # pi-auto-compact
 
-Pi extension that proactively runs Pi's **default `/compact` behavior** when context usage reaches **60%** of the selected model's context window.
+Pi extension that proactively runs Pi's **default `/compact` behavior** when context usage reaches a configurable percentage of the selected model's context window.
 
-Auto-compaction is enabled by default and can be toggled with `/auto-compact on|off`.
+Auto-compaction is enabled by default. The default threshold is **60%** and can be changed with `/auto-compact threshold <percent>`.
 
 ## Behavior
 
@@ -31,6 +31,9 @@ That is the same mechanism behind `/compact`: Pi summarizes older context into a
 /auto-compact status          # status
 /auto-compact on              # enable automatic compaction
 /auto-compact off             # disable automatic compaction
+/auto-compact threshold 60    # set trigger threshold, 1-95
+/auto-compact threshold 75%   # percent sign is optional
+/auto-compact reset           # reset to enabled at 60%
 /auto-compact now             # manually run default compaction now
 /auto-compact now Focus on current bug and touched files
 ```
@@ -50,7 +53,8 @@ Default:
 
 ```json
 {
-  "enabled": true
+  "enabled": true,
+  "thresholdPercent": 60
 }
 ```
 
