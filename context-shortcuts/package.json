@@ -1,0 +1,27 @@
+{
+  "name": "@ash-ishh/pi-context-shortcuts",
+  "version": "0.1.0",
+  "description": "Pi extension that expands @shortcut aliases into configured context files",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "context"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ash-ishh/pi-extensions.git",
+    "directory": "context-shortcuts"
+  },
+  "author": "Ashish",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/context-shortcuts.ts"
+    ]
+  }
+}
