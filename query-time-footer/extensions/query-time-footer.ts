@@ -14,6 +14,7 @@ export default function (pi: ExtensionAPI) {
 	let lastDurationMs: number | null = null;
 
 	function setIdleStatus(ctx: ExtensionContext) {
+		if (!ctx.hasUI) return;
 		const theme = ctx.ui.theme;
 		const count = theme.fg("accent", `#${queryCount}`);
 		const label = lastDurationMs === null
@@ -22,20 +23,21 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("query-time-footer", count + label);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		setIdleStatus(ctx);
 	});
 
-	pi.on("agent_start", async (_event, ctx) => {
+	pi.on("agent_start", (_event, ctx) => {
 		startedAt = Date.now();
 		queryCount += 1;
+		if (!ctx.hasUI) return;
 		const theme = ctx.ui.theme;
 		const spinner = theme.fg("accent", "●");
 		const text = theme.fg("dim", ` query #${queryCount} running...`);
 		ctx.ui.setStatus("query-time-footer", spinner + text);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", (_event, ctx) => {
 		if (startedAt > 0) lastDurationMs = Date.now() - startedAt;
 		startedAt = 0;
 		setIdleStatus(ctx);

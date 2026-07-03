@@ -225,6 +225,10 @@ function getCurrentModelKey(model: ExtensionContext["model"]): string | undefine
 	return `${model.provider}/${model.id}`;
 }
 
+function getSupportedModelKey(model: FastSupportedModel): string {
+	return `${model.provider}/${model.id}`;
+}
+
 function isFastSupportedModel(model: ExtensionContext["model"], supportedModels: FastSupportedModel[]): boolean {
 	if (!model) {
 		return false;
@@ -266,10 +270,16 @@ function applyFastServiceTier(payload: unknown): unknown {
 export default function piOpenAIFast(pi: ExtensionAPI): void {
 	let state: FastModeState = { active: false };
 	let cachedConfig: ResolvedFastConfig | undefined;
+	let cachedSupportedModelKeys = new Set<string>();
+
+	function setCachedConfig(config: ResolvedFastConfig): ResolvedFastConfig {
+		cachedConfig = config;
+		cachedSupportedModelKeys = new Set(config.supportedModels.map(getSupportedModelKey));
+		return config;
+	}
 
 	function refreshConfig(ctx: ExtensionContext): ResolvedFastConfig {
-		cachedConfig = resolveFastConfig(getConfigCwd(ctx));
-		return cachedConfig;
+		return setCachedConfig(resolveFastConfig(getConfigCwd(ctx)));
 	}
 
 	function getConfig(ctx: ExtensionContext): ResolvedFastConfig {
@@ -277,7 +287,7 @@ export default function piOpenAIFast(pi: ExtensionAPI): void {
 	}
 
 	function persistState(config: ResolvedFastConfig): void {
-		cachedConfig = { ...config, active: state.active };
+		setCachedConfig({ ...config, active: state.active });
 		if (!config.persistState) {
 			return;
 		}
@@ -367,14 +377,15 @@ export default function piOpenAIFast(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const config = getConfig(ctx);
-		if (!state.active || !isFastSupportedModel(ctx.model, config.supportedModels)) {
-			return;
-		}
+		if (!state.active) return;
+		const modelKey = getCurrentModelKey(ctx.model);
+		if (!modelKey) return;
+		getConfig(ctx);
+		if (!cachedSupportedModelKeys.has(modelKey)) return;
 		return applyFastServiceTier(event.payload);
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		const config = refreshConfig(ctx);
 		state = config.persistState && typeof config.active === "boolean" ? { active: config.active } : { active: false };
 
