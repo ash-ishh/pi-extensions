@@ -19,7 +19,6 @@ const FOLLOW_UP_BY_PHASE = {
 } as const;
 
 type AutoCompactPhase = keyof typeof FOLLOW_UP_BY_PHASE;
-type CompactPhase = AutoCompactPhase | "manual";
 
 interface AutoCompactConfigFile {
 	enabled?: boolean;
@@ -242,11 +241,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		});
 	}
 
-	function triggerCompaction(
-		ctx: ExtensionContext,
-		phase: CompactPhase,
-		customInstructions: string = DEFAULT_COMPACT_INSTRUCTIONS,
-	): boolean {
+	function triggerCompaction(ctx: ExtensionContext, phase: AutoCompactPhase): boolean {
 		if (pendingCompaction) return false;
 
 		pendingCompaction = true;
@@ -260,7 +255,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		);
 
 		ctx.compact({
-			customInstructions,
+			customInstructions: DEFAULT_COMPACT_INSTRUCTIONS,
 			onComplete: () => {
 				pendingCompaction = false;
 				notify(ctx, "Auto-compact completed.", "info");
@@ -315,9 +310,9 @@ export default function autoCompact(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Configure auto-compaction, show status, or manually run default pi compaction",
+		description: "Configure auto-compaction or show status",
 		getArgumentCompletions: (prefix) => {
-			const commands = ["on", "off", "status", "threshold", "now", "reset"];
+			const commands = ["on", "off", "status", "threshold", "reset"];
 			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value }));
 			return items.length > 0 ? items : null;
 		},
@@ -374,13 +369,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 				return;
 			}
 
-			if (command === "now") {
-				const customInstructions = rest.join(" ").trim() || DEFAULT_COMPACT_INSTRUCTIONS;
-				triggerCompaction(ctx, "manual", customInstructions);
-				return;
-			}
-
-			ctx.ui.notify(`Usage: /${COMMAND_NAME} [on|off|status|threshold <percent>|now [instructions...]|reset]`, "warning");
+			ctx.ui.notify(`Usage: /${COMMAND_NAME} [on|off|status|threshold <percent>|reset]`, "warning");
 		},
 	});
 }

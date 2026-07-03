@@ -34,11 +34,9 @@ That is the same mechanism behind `/compact`: Pi summarizes older context into a
 /auto-compact threshold 60    # set trigger threshold, 1-95
 /auto-compact threshold 75%   # percent sign is optional
 /auto-compact reset           # reset to enabled at 60%
-/auto-compact now             # manually run default compaction now
-/auto-compact now Focus on current bug and touched files
 ```
 
-Manual `now` still works even when automatic compaction is disabled.
+For manual compaction, use Pi's built-in `/compact` command.
 
 ## Config
 
