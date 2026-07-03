@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const COMMAND_NAME = "auto-compact";
 const CONFIG_BASENAME = "pi-auto-compact.json";
+const SESSION_CONFIG_CUSTOM_TYPE = "pi-auto-compact-config";
 const DEFAULT_THRESHOLD_PERCENT = 60;
 const MIN_THRESHOLD_PERCENT = 1;
 const MAX_THRESHOLD_PERCENT = 95;
@@ -19,6 +20,9 @@ const FOLLOW_UP_BY_PHASE = {
 } as const;
 
 type AutoCompactPhase = keyof typeof FOLLOW_UP_BY_PHASE;
+type ConfigScope = "session" | "project" | "global";
+type ThresholdSource = ConfigScope | "default";
+type EnabledSource = Exclude<ThresholdSource, "session">;
 
 interface AutoCompactConfigFile {
 	enabled?: boolean;
@@ -27,8 +31,17 @@ interface AutoCompactConfigFile {
 
 interface ResolvedAutoCompactConfig {
 	configPath: string;
+	projectConfigPath: string;
+	globalConfigPath: string;
+	projectConfigExists: boolean;
+	globalConfigExists: boolean;
 	enabled: boolean;
+	enabledSource: EnabledSource;
 	thresholdPercent: number;
+	thresholdSource: ThresholdSource;
+	sessionThresholdPercent?: number;
+	projectThresholdPercent?: number;
+	globalThresholdPercent?: number;
 }
 
 interface UsageSnapshot {
@@ -37,6 +50,13 @@ interface UsageSnapshot {
 	limit: number;
 	percent: number | null;
 	thresholdPercent: number;
+	thresholdSource: ThresholdSource;
+}
+
+interface ScopedThresholdArgs {
+	scope: ConfigScope;
+	thresholdPercent?: number;
+	unexpected?: string;
 }
 
 const DEFAULT_CONFIG: Required<AutoCompactConfigFile> = {
@@ -60,8 +80,56 @@ function parseThresholdPercent(value: string | undefined): number | undefined {
 	return normalizeThresholdPercent(parsed);
 }
 
+function parseScopeToken(value: string | undefined): ConfigScope | undefined {
+	const normalized = value?.trim().replace(/^--/, "");
+	if (normalized === "session" || normalized === "project" || normalized === "global") return normalized;
+	return undefined;
+}
+
+function parseScopedThresholdArgs(args: string[], defaultScope: ConfigScope = "session"): ScopedThresholdArgs {
+	let scope = defaultScope;
+	let thresholdToken: string | undefined;
+	let unexpected: string | undefined;
+
+	for (const arg of args) {
+		const parsedScope = parseScopeToken(arg);
+		if (parsedScope) {
+			scope = parsedScope;
+			continue;
+		}
+
+		if (thresholdToken === undefined) {
+			thresholdToken = arg;
+			continue;
+		}
+
+		unexpected = arg;
+		break;
+	}
+
+	return { scope, thresholdPercent: parseThresholdPercent(thresholdToken), unexpected };
+}
+
+function parseScopedResetArgs(args: string[], defaultScope: ConfigScope = "session"): ConfigScope | undefined {
+	let scope = defaultScope;
+	for (const arg of args) {
+		const parsedScope = parseScopeToken(arg);
+		if (!parsedScope) return undefined;
+		scope = parsedScope;
+	}
+	return scope;
+}
+
 function formatPercent(percent: number): string {
 	return Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(1)}%`;
+}
+
+function formatOptionalPercent(percent: number | undefined): string {
+	return percent === undefined ? "not set" : formatPercent(percent);
+}
+
+function formatScope(scope: ThresholdSource): string {
+	return scope;
 }
 
 function computeLimit(contextWindow: number, thresholdPercent: number): number {
@@ -108,25 +176,81 @@ function writeConfigFile(filePath: string, config: AutoCompactConfigFile): void 
 	}
 }
 
-function ensureDefaultConfigFile(projectConfigPath: string, globalConfigPath: string): void {
-	if (existsSync(projectConfigPath) || existsSync(globalConfigPath)) return;
-	writeConfigFile(globalConfigPath, DEFAULT_CONFIG);
-}
+function resolveAutoCompactConfig(
+	cwd: string,
+	sessionThresholdPercentOrHomeDir?: number | string,
+	maybeHomeDir: string = homedir(),
+): ResolvedAutoCompactConfig {
+	let sessionThresholdPercent: number | undefined;
+	let homeDir = maybeHomeDir;
+	if (typeof sessionThresholdPercentOrHomeDir === "string") {
+		homeDir = sessionThresholdPercentOrHomeDir;
+	} else {
+		sessionThresholdPercent = sessionThresholdPercentOrHomeDir;
+	}
 
-function resolveAutoCompactConfig(cwd: string, homeDir: string = homedir()): ResolvedAutoCompactConfig {
 	const { projectConfigPath, globalConfigPath } = getConfigPaths(cwd, homeDir);
-	ensureDefaultConfigFile(projectConfigPath, globalConfigPath);
-
+	const projectConfigExists = existsSync(projectConfigPath);
+	const globalConfigExists = existsSync(globalConfigPath);
 	const globalConfig = readConfigFile(globalConfigPath) ?? {};
 	const projectConfig = readConfigFile(projectConfigPath) ?? {};
-	const selectedConfigPath = existsSync(projectConfigPath) ? projectConfigPath : globalConfigPath;
-	const merged = { ...globalConfig, ...projectConfig };
+	const selectedConfigPath = projectConfigExists ? projectConfigPath : globalConfigPath;
+
+	let thresholdPercent = DEFAULT_CONFIG.thresholdPercent;
+	let thresholdSource: ThresholdSource = "default";
+	const globalThresholdPercent = globalConfig.thresholdPercent;
+	const projectThresholdPercent = projectConfig.thresholdPercent;
+	if (globalThresholdPercent !== undefined) {
+		thresholdPercent = globalThresholdPercent;
+		thresholdSource = "global";
+	}
+	if (projectThresholdPercent !== undefined) {
+		thresholdPercent = projectThresholdPercent;
+		thresholdSource = "project";
+	}
+	if (sessionThresholdPercent !== undefined) {
+		thresholdPercent = sessionThresholdPercent;
+		thresholdSource = "session";
+	}
+
+	let enabled = DEFAULT_CONFIG.enabled;
+	let enabledSource: EnabledSource = "default";
+	if (globalConfig.enabled !== undefined) {
+		enabled = globalConfig.enabled;
+		enabledSource = "global";
+	}
+	if (projectConfig.enabled !== undefined) {
+		enabled = projectConfig.enabled;
+		enabledSource = "project";
+	}
 
 	return {
 		configPath: selectedConfigPath,
-		enabled: merged.enabled ?? DEFAULT_CONFIG.enabled,
-		thresholdPercent: merged.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent,
+		projectConfigPath,
+		globalConfigPath,
+		projectConfigExists,
+		globalConfigExists,
+		enabled,
+		enabledSource,
+		thresholdPercent,
+		thresholdSource,
+		sessionThresholdPercent,
+		projectThresholdPercent,
+		globalThresholdPercent,
 	};
+}
+
+function readSessionThresholdPercent(ctx: ExtensionContext): number | undefined {
+	const entries = ctx.sessionManager.getEntries();
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "custom" || entry.customType !== SESSION_CONFIG_CUSTOM_TYPE) continue;
+		const data = entry.data;
+		if (!isRecord(data) || !("thresholdPercent" in data)) continue;
+		if (data.thresholdPercent === null) return undefined;
+		return normalizeThresholdPercent(data.thresholdPercent);
+	}
+	return undefined;
 }
 
 function formatTokens(tokens: number | null): string {
@@ -163,7 +287,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 	}
 
 	function refreshConfig(ctx: ExtensionContext): ResolvedAutoCompactConfig {
-		cachedConfig = resolveAutoCompactConfig(getConfigCwd(ctx));
+		cachedConfig = resolveAutoCompactConfig(getConfigCwd(ctx), readSessionThresholdPercent(ctx));
 		recomputeCachedLimit();
 		return cachedConfig;
 	}
@@ -172,36 +296,67 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		return cachedConfig ?? refreshConfig(ctx);
 	}
 
+	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
+		if (ctx.hasUI) {
+			ctx.ui.notify(message, level);
+		}
+	}
+
 	function setEnabled(ctx: ExtensionContext, enabled: boolean): void {
 		const config = refreshConfig(ctx);
 		const nextConfig = { ...(readConfigFile(config.configPath) ?? {}), enabled };
 		writeConfigFile(config.configPath, nextConfig);
-		cachedConfig = { ...config, enabled };
+		refreshConfig(ctx);
 		if (enabled) thresholdArmed = true;
 		notify(ctx, `Auto-compact is now ${enabled ? "enabled" : "disabled"}.`, "info");
 	}
 
-	function setThresholdPercent(ctx: ExtensionContext, thresholdPercent: number): void {
-		const config = refreshConfig(ctx);
-		const nextConfig = { ...(readConfigFile(config.configPath) ?? {}), thresholdPercent };
-		writeConfigFile(config.configPath, nextConfig);
-		cachedConfig = { ...config, thresholdPercent };
-		recomputeCachedLimit();
-		thresholdArmed = true;
-		notify(
-			ctx,
-			`Auto-compact threshold set to ${formatPercent(thresholdPercent)} (${formatTokens(cachedLimit)} tokens for current model).`,
-			"info",
-		);
+	function getScopedConfigPath(ctx: ExtensionContext, scope: Exclude<ConfigScope, "session">): string {
+		const paths = getConfigPaths(getConfigCwd(ctx));
+		return scope === "project" ? paths.projectConfigPath : paths.globalConfigPath;
 	}
 
-	function resetConfig(ctx: ExtensionContext): void {
+	function setThresholdPercent(ctx: ExtensionContext, thresholdPercent: number, scope: ConfigScope): void {
+		if (scope === "session") {
+			pi.appendEntry(SESSION_CONFIG_CUSTOM_TYPE, { version: 1, thresholdPercent });
+		} else {
+			const configPath = getScopedConfigPath(ctx, scope);
+			const nextConfig = { ...(readConfigFile(configPath) ?? {}), thresholdPercent };
+			writeConfigFile(configPath, nextConfig);
+		}
+
 		const config = refreshConfig(ctx);
-		writeConfigFile(config.configPath, DEFAULT_CONFIG);
-		cachedConfig = { configPath: config.configPath, ...DEFAULT_CONFIG };
-		recomputeCachedLimit();
 		thresholdArmed = true;
-		notify(ctx, `Auto-compact reset to enabled at ${formatPercent(DEFAULT_CONFIG.thresholdPercent)}.`, "info");
+		const targetLimit = computeLimit(cachedContextWindow, thresholdPercent);
+		let message = `${formatScope(scope)} auto-compact threshold set to ${formatPercent(thresholdPercent)} (${formatTokens(targetLimit)} tokens for current model).`;
+		if (config.thresholdSource !== scope || config.thresholdPercent !== thresholdPercent) {
+			message += ` Effective threshold is ${formatPercent(config.thresholdPercent)} (${formatScope(config.thresholdSource)}, ${formatTokens(cachedLimit)} tokens for current model).`;
+		}
+		notify(ctx, message, "info");
+	}
+
+	function resetConfig(ctx: ExtensionContext, scope: ConfigScope): void {
+		if (scope === "session") {
+			pi.appendEntry(SESSION_CONFIG_CUSTOM_TYPE, { version: 1, thresholdPercent: null });
+			const config = refreshConfig(ctx);
+			thresholdArmed = true;
+			notify(
+				ctx,
+				`Session auto-compact threshold override cleared. Effective threshold is ${formatPercent(config.thresholdPercent)} (${formatScope(config.thresholdSource)}).`,
+				"info",
+			);
+			return;
+		}
+
+		const configPath = getScopedConfigPath(ctx, scope);
+		writeConfigFile(configPath, DEFAULT_CONFIG);
+		const config = refreshConfig(ctx);
+		thresholdArmed = true;
+		let message = `${formatScope(scope)} auto-compact config reset to enabled at ${formatPercent(DEFAULT_CONFIG.thresholdPercent)}.`;
+		if (config.thresholdSource !== scope || config.thresholdPercent !== DEFAULT_CONFIG.thresholdPercent) {
+			message += ` Effective threshold is ${formatPercent(config.thresholdPercent)} (${formatScope(config.thresholdSource)}).`;
+		}
+		notify(ctx, message, "info");
 	}
 
 	function updateLimits(contextWindow: number | undefined): void {
@@ -218,6 +373,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		// pre-compaction tokens here causes repeated "Already compacted" attempts.
 		const tokens = usage?.tokens ?? null;
 		const thresholdPercent = cachedConfig?.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent;
+		const thresholdSource = cachedConfig?.thresholdSource ?? "default";
 		const percent = usage?.percent ?? (tokens === null ? null : (tokens / cachedContextWindow) * 100);
 		return {
 			tokens,
@@ -225,13 +381,8 @@ export default function autoCompact(pi: ExtensionAPI): void {
 			limit: cachedLimit,
 			percent,
 			thresholdPercent,
+			thresholdSource,
 		};
-	}
-
-	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
-		if (ctx.hasUI) {
-			ctx.ui.notify(message, level);
-		}
 	}
 
 	function autoContinueIfIdle(ctx: ExtensionContext, phase: AutoCompactPhase): void {
@@ -251,7 +402,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		lastTrigger = phase;
 		notify(
 			ctx,
-			`Auto-compact started (${phase}; ${formatTokens(usage.tokens)} / ${formatTokens(usage.contextWindow)} tokens, threshold ${formatPercent(usage.thresholdPercent)}).`,
+			`Auto-compact started (${phase}; ${formatTokens(usage.tokens)} / ${formatTokens(usage.contextWindow)} tokens, threshold ${formatPercent(usage.thresholdPercent)} (${formatScope(usage.thresholdSource)})).`,
 			"info",
 		);
 
@@ -353,20 +504,25 @@ export default function autoCompact(pi: ExtensionAPI): void {
 			}
 
 			if (command === "threshold") {
-				const thresholdPercent = parseThresholdPercent(rest[0]);
-				if (thresholdPercent === undefined) {
+				const parsed = parseScopedThresholdArgs(rest);
+				if (parsed.unexpected || parsed.thresholdPercent === undefined) {
 					ctx.ui.notify(
-						`Usage: /${COMMAND_NAME} threshold <${MIN_THRESHOLD_PERCENT}-${MAX_THRESHOLD_PERCENT}>`,
+						`Usage: /${COMMAND_NAME} threshold [--session|--project|--global] <${MIN_THRESHOLD_PERCENT}-${MAX_THRESHOLD_PERCENT}>`,
 						"warning",
 					);
 					return;
 				}
-				setThresholdPercent(ctx, thresholdPercent);
+				setThresholdPercent(ctx, parsed.thresholdPercent, parsed.scope);
 				return;
 			}
 
 			if (command === "reset") {
-				resetConfig(ctx);
+				const scope = parseScopedResetArgs(rest);
+				if (!scope) {
+					ctx.ui.notify(`Usage: /${COMMAND_NAME} reset [--session|--project|--global]`, "warning");
+					return;
+				}
+				resetConfig(ctx, scope);
 				return;
 			}
 
@@ -376,8 +532,11 @@ export default function autoCompact(pi: ExtensionAPI): void {
 				const percent = usage.percent === null ? "unknown" : `${usage.percent.toFixed(1)}%`;
 				ctx.ui.notify(
 					`Auto Compact Status:\n` +
-						`  Enabled: ${config.enabled ? "yes" : "no"}\n` +
-						`  Threshold: ${formatPercent(config.thresholdPercent)}\n` +
+						`  Enabled: ${config.enabled ? "yes" : "no"} (${formatScope(config.enabledSource)})\n` +
+						`  Effective threshold: ${formatPercent(config.thresholdPercent)} (${formatScope(config.thresholdSource)})\n` +
+						`  Session threshold: ${formatOptionalPercent(config.sessionThresholdPercent)}\n` +
+						`  Project threshold: ${formatOptionalPercent(config.projectThresholdPercent)}\n` +
+						`  Global threshold: ${formatOptionalPercent(config.globalThresholdPercent)}\n` +
 						`  Current tokens: ${formatTokens(usage.tokens)}\n` +
 						`  Context window: ${formatTokens(usage.contextWindow)}\n` +
 						`  Trigger at: ${formatTokens(usage.limit)} tokens\n` +
@@ -386,13 +545,18 @@ export default function autoCompact(pi: ExtensionAPI): void {
 						`  Armed: ${thresholdArmed}\n` +
 						`  Trigger count: ${triggerCount}\n` +
 						`  Last trigger: ${lastTrigger ?? "never"}\n` +
-						`  Config: ${config.configPath}`,
+						`  Project config: ${config.projectConfigPath}${config.projectConfigExists ? "" : " (missing)"}\n` +
+						`  Global config: ${config.globalConfigPath}${config.globalConfigExists ? "" : " (missing)"}\n` +
+						`  Config for on/off: ${config.configPath}`,
 					"info",
 				);
 				return;
 			}
 
-			ctx.ui.notify(`Usage: /${COMMAND_NAME} [on|off|status|threshold <percent>|reset]`, "warning");
+			ctx.ui.notify(
+				`Usage: /${COMMAND_NAME} [on|off|status|threshold [--session|--project|--global] <percent>|reset [--session|--project|--global]]`,
+				"warning",
+			);
 		},
 	});
 }
@@ -400,6 +564,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 export const _test = {
 	COMMAND_NAME,
 	CONFIG_BASENAME,
+	SESSION_CONFIG_CUSTOM_TYPE,
 	DEFAULT_THRESHOLD_PERCENT,
 	MIN_THRESHOLD_PERCENT,
 	MAX_THRESHOLD_PERCENT,
@@ -409,7 +574,11 @@ export const _test = {
 	getConfigPaths,
 	readConfigFile,
 	resolveAutoCompactConfig,
+	readSessionThresholdPercent,
 	parseThresholdPercent,
+	parseScopeToken,
+	parseScopedThresholdArgs,
+	parseScopedResetArgs,
 	formatPercent,
 	formatTokens,
 	hasToolCalls,

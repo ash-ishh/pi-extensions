@@ -20,8 +20,22 @@
     "url": "https://github.com/ash-ishh/pi-extensions/issues"
   },
   "homepage": "https://github.com/ash-ishh/pi-extensions#readme",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.10",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "pi": {
     "extensions": [
