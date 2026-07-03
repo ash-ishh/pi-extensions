@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -6,6 +6,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const COMMAND_NAME = "context-shortcuts";
 const CONFIG_BASENAME = "context-shortcuts.json";
 const MAX_CONTEXT_FILE_BYTES = 500 * 1024;
+const AUTOCOMPLETE_SHORTCUT_CACHE_MS = 1_000;
+const SHORTCUT_TOKEN_PATTERN = /(^|[^\w./~-])@[A-Za-z0-9][A-Za-z0-9_-]*(?![\w./-])/;
 
 const DEFAULT_SHORTCUTS = {
 	project_context: {
@@ -46,6 +48,18 @@ interface ShortcutExpansion {
 	errors: string[];
 }
 
+interface LoadedShortcuts {
+	shortcuts: Map<string, ResolvedShortcut>;
+	projectConfigPath: string;
+	globalConfigPath: string;
+	signature: string;
+	checkedAtMs: number;
+}
+
+interface ShortcutCache {
+	snapshot?: LoadedShortcuts;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -69,6 +83,19 @@ function getConfigPaths(
 		projectConfigPath: join(cwd, ".pi", "extensions", CONFIG_BASENAME),
 		globalConfigPath: join(homeDir, ".pi", "agent", "extensions", CONFIG_BASENAME),
 	};
+}
+
+function getFileSignature(filePath: string): string {
+	try {
+		const stats = statSync(filePath);
+		return stats.isFile() ? `${stats.mtimeMs}:${stats.size}` : "not-file";
+	} catch {
+		return "missing";
+	}
+}
+
+function getConfigSignature(projectConfigPath: string, globalConfigPath: string): string {
+	return `${globalConfigPath}:${getFileSignature(globalConfigPath)}|${projectConfigPath}:${getFileSignature(projectConfigPath)}`;
 }
 
 function expandHomePath(filePath: string, homeDir: string = homedir()): string {
@@ -145,11 +172,7 @@ function mergeConfigShortcuts(
 	}
 }
 
-function loadShortcuts(ctx: ExtensionContext): {
-	shortcuts: Map<string, ResolvedShortcut>;
-	projectConfigPath: string;
-	globalConfigPath: string;
-} {
+function loadShortcutsFromDisk(ctx: ExtensionContext, signature?: string): LoadedShortcuts {
 	const cwd = getConfigCwd(ctx);
 	const { projectConfigPath, globalConfigPath } = getConfigPaths(cwd);
 	const shortcuts = new Map<string, ResolvedShortcut>();
@@ -158,7 +181,51 @@ function loadShortcuts(ctx: ExtensionContext): {
 	mergeConfigShortcuts(shortcuts, readConfigFile(globalConfigPath), dirname(globalConfigPath), "global");
 	mergeConfigShortcuts(shortcuts, readConfigFile(projectConfigPath), dirname(projectConfigPath), "project");
 
-	return { shortcuts, projectConfigPath, globalConfigPath };
+	return {
+		shortcuts,
+		projectConfigPath,
+		globalConfigPath,
+		signature: signature ?? getConfigSignature(projectConfigPath, globalConfigPath),
+		checkedAtMs: Date.now(),
+	};
+}
+
+function getCachedShortcuts(
+	ctx: ExtensionContext,
+	cache: ShortcutCache,
+	options: { force?: boolean; maxAgeMs?: number } = {},
+): LoadedShortcuts {
+	const now = Date.now();
+	const current = cache.snapshot;
+	const cwd = getConfigCwd(ctx);
+	const { projectConfigPath, globalConfigPath } = getConfigPaths(cwd);
+	if (
+		!options.force &&
+		current &&
+		current.projectConfigPath === projectConfigPath &&
+		current.globalConfigPath === globalConfigPath &&
+		options.maxAgeMs !== undefined &&
+		now - current.checkedAtMs < options.maxAgeMs
+	) {
+		return current;
+	}
+
+	const signature = getConfigSignature(projectConfigPath, globalConfigPath);
+
+	if (
+		!options.force &&
+		current &&
+		current.projectConfigPath === projectConfigPath &&
+		current.globalConfigPath === globalConfigPath &&
+		current.signature === signature
+	) {
+		current.checkedAtMs = now;
+		return current;
+	}
+
+	cache.snapshot = loadShortcutsFromDisk(ctx, signature);
+	cache.snapshot.checkedAtMs = now;
+	return cache.snapshot;
 }
 
 function ensureDefaultConfigFile(ctx: ExtensionContext): void {
@@ -182,6 +249,10 @@ function extractShortcutToken(textBeforeCursor: string): string | undefined {
 	return match?.[1];
 }
 
+function hasShortcutToken(text: string): boolean {
+	return text.includes("@") && SHORTCUT_TOKEN_PATTERN.test(text);
+}
+
 function findReferencedShortcuts(text: string, shortcuts: Map<string, ResolvedShortcut>): ResolvedShortcut[] {
 	const found = new Map<string, ResolvedShortcut>();
 	const tokenRegex = /(^|[^\w./~-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![\w./-])/g;
@@ -202,6 +273,22 @@ function escapeAttribute(value: string): string {
 		.replaceAll(">", "&gt;");
 }
 
+function readFilePrefix(filePath: string, fileSize: number): { content: string; truncated: boolean } {
+	const bytesToRead = Math.min(fileSize, MAX_CONTEXT_FILE_BYTES + 1);
+	const fd = openSync(filePath, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(bytesToRead);
+		const bytesRead = readSync(fd, buffer, 0, bytesToRead, 0);
+		const outputBytes = Math.min(bytesRead, MAX_CONTEXT_FILE_BYTES);
+		return {
+			content: buffer.subarray(0, outputBytes).toString("utf-8"),
+			truncated: fileSize > MAX_CONTEXT_FILE_BYTES || bytesRead > MAX_CONTEXT_FILE_BYTES,
+		};
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function readShortcutFile(shortcut: ResolvedShortcut, filePath: string): {
 	text: string;
 	file?: string;
@@ -210,12 +297,19 @@ function readShortcutFile(shortcut: ResolvedShortcut, filePath: string): {
 	try {
 		const stats = statSync(filePath);
 		if (stats.isDirectory()) {
-			return { text: `<file name="${escapeAttribute(filePath)}" error="is a directory"></file>`, error: `${shortcut.name}: ${filePath} is a directory` };
+			return {
+				text: `<file name="${escapeAttribute(filePath)}" error="is a directory"></file>`,
+				error: `${shortcut.name}: ${filePath} is a directory`,
+			};
+		}
+		if (!stats.isFile()) {
+			return {
+				text: `<file name="${escapeAttribute(filePath)}" error="not a regular file"></file>`,
+				error: `${shortcut.name}: ${filePath} is not a regular file`,
+			};
 		}
 
-		const buffer = readFileSync(filePath);
-		const truncated = buffer.byteLength > MAX_CONTEXT_FILE_BYTES;
-		const content = buffer.subarray(0, MAX_CONTEXT_FILE_BYTES).toString("utf-8");
+		const { content, truncated } = readFilePrefix(filePath, stats.size);
 		const note = truncated
 			? `\n\n[context-shortcuts: truncated ${filePath} at ${MAX_CONTEXT_FILE_BYTES} bytes]`
 			: "";
@@ -259,8 +353,11 @@ function buildShortcutExpansion(references: ResolvedShortcut[]): ShortcutExpansi
 	return { content: lines.join("\n"), names, files, errors };
 }
 
-function expandShortcutsForText(text: string, ctx: ExtensionContext): ShortcutExpansion | undefined {
-	const { shortcuts } = loadShortcuts(ctx);
+function expandShortcutsForText(
+	text: string,
+	shortcuts: Map<string, ResolvedShortcut>,
+): ShortcutExpansion | undefined {
+	if (!hasShortcutToken(text)) return undefined;
 	const references = findReferencedShortcuts(text, shortcuts);
 	return buildShortcutExpansion(references);
 }
@@ -278,8 +375,8 @@ function notifyExpansion(ctx: ExtensionContext, expansion: ShortcutExpansion): v
 	}
 }
 
-function formatShortcutList(ctx: ExtensionContext): string {
-	const { shortcuts, globalConfigPath, projectConfigPath } = loadShortcuts(ctx);
+function formatShortcutList(loaded: LoadedShortcuts): string {
+	const { shortcuts, globalConfigPath, projectConfigPath } = loaded;
 	const rows = [...shortcuts.values()]
 		.sort((a, b) => a.name.localeCompare(b.name))
 		.map((shortcut) => {
@@ -317,8 +414,12 @@ function createAliasItems(shortcuts: Map<string, ResolvedShortcut>, query: strin
 }
 
 export default function contextShortcuts(pi: ExtensionAPI): void {
-	pi.on("session_start", async (_event, ctx) => {
+	const shortcutCache: ShortcutCache = {};
+
+	pi.on("session_start", (_event, ctx) => {
 		ensureDefaultConfigFile(ctx);
+		if (!ctx.hasUI) return;
+
 		ctx.ui.addAutocompleteProvider((current) => ({
 			async getSuggestions(lines, cursorLine, cursorCol, options) {
 				const currentLine = lines[cursorLine] ?? "";
@@ -328,7 +429,9 @@ export default function contextShortcuts(pi: ExtensionAPI): void {
 					return current.getSuggestions(lines, cursorLine, cursorCol, options);
 				}
 
-				const { shortcuts } = loadShortcuts(ctx);
+				const { shortcuts } = getCachedShortcuts(ctx, shortcutCache, {
+					maxAgeMs: AUTOCOMPLETE_SHORTCUT_CACHE_MS,
+				});
 				const items = createAliasItems(shortcuts, token);
 				if (items.length === 0) {
 					return current.getSuggestions(lines, cursorLine, cursorCol, options);
@@ -347,8 +450,10 @@ export default function contextShortcuts(pi: ExtensionAPI): void {
 		}));
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
-		const expansion = expandShortcutsForText(event.prompt, ctx);
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!hasShortcutToken(event.prompt)) return undefined;
+		const { shortcuts } = getCachedShortcuts(ctx, shortcutCache);
+		const expansion = expandShortcutsForText(event.prompt, shortcuts);
 		if (!expansion) return undefined;
 		notifyExpansion(ctx, expansion);
 		return {
@@ -374,7 +479,7 @@ export default function contextShortcuts(pi: ExtensionAPI): void {
 		},
 		handler: async (_args, ctx) => {
 			ensureDefaultConfigFile(ctx);
-			ctx.ui.notify(formatShortcutList(ctx), "info");
+			ctx.ui.notify(formatShortcutList(getCachedShortcuts(ctx, shortcutCache, { force: true })), "info");
 		},
 	});
 }
@@ -385,6 +490,7 @@ export const _test = {
 	MAX_CONTEXT_FILE_BYTES,
 	escapeAttribute,
 	extractShortcutToken,
+	hasShortcutToken,
 	findReferencedShortcuts,
 	getConfigPaths,
 	normalizeShortcut,

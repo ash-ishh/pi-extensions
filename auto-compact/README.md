@@ -14,6 +14,8 @@ Checks context usage at:
 
 When compaction interrupts an active turn (`turn_start` or mid-tool `turn_end`), the extension sends a short follow-up user message after compaction so Pi continues the interrupted task. Session-start compaction does not auto-start a new agent turn.
 
+To avoid compaction loops, it triggers only once per threshold crossing. After Pi reports unknown usage (for example immediately after compaction) or `Already compacted`, it waits until usage drops below the threshold and crosses it again before retrying.
+
 ## What strategy does it use?
 
 No custom pruning strategy. It delegates to Pi's built-in compaction via:

@@ -151,7 +151,7 @@ function getConfigCwd(ctx: ExtensionContext): string {
 
 export default function autoCompact(pi: ExtensionAPI): void {
 	let pendingCompaction = false;
-	let lastKnownTokens: number | null = null;
+	let thresholdArmed = true;
 	let cachedContextWindow = DEFAULT_CONTEXT_WINDOW;
 	let cachedConfig: ResolvedAutoCompactConfig | undefined;
 	let cachedLimit = computeLimit(DEFAULT_CONTEXT_WINDOW, DEFAULT_CONFIG.thresholdPercent);
@@ -177,6 +177,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		const nextConfig = { ...(readConfigFile(config.configPath) ?? {}), enabled };
 		writeConfigFile(config.configPath, nextConfig);
 		cachedConfig = { ...config, enabled };
+		if (enabled) thresholdArmed = true;
 		notify(ctx, `Auto-compact is now ${enabled ? "enabled" : "disabled"}.`, "info");
 	}
 
@@ -186,6 +187,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		writeConfigFile(config.configPath, nextConfig);
 		cachedConfig = { ...config, thresholdPercent };
 		recomputeCachedLimit();
+		thresholdArmed = true;
 		notify(
 			ctx,
 			`Auto-compact threshold set to ${formatPercent(thresholdPercent)} (${formatTokens(cachedLimit)} tokens for current model).`,
@@ -198,6 +200,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		writeConfigFile(config.configPath, DEFAULT_CONFIG);
 		cachedConfig = { configPath: config.configPath, ...DEFAULT_CONFIG };
 		recomputeCachedLimit();
+		thresholdArmed = true;
 		notify(ctx, `Auto-compact reset to enabled at ${formatPercent(DEFAULT_CONFIG.thresholdPercent)}.`, "info");
 	}
 
@@ -211,11 +214,9 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		const usage = ctx.getContextUsage();
 		updateLimits(usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
 
-		if (usage?.tokens !== null && usage?.tokens !== undefined) {
-			lastKnownTokens = usage.tokens;
-		}
-
-		const tokens = usage?.tokens ?? lastKnownTokens;
+		// Respect Pi's explicit unknown state after compaction. Reusing stale
+		// pre-compaction tokens here causes repeated "Already compacted" attempts.
+		const tokens = usage?.tokens ?? null;
 		const thresholdPercent = cachedConfig?.thresholdPercent ?? DEFAULT_CONFIG.thresholdPercent;
 		const percent = usage?.percent ?? (tokens === null ? null : (tokens / cachedContextWindow) * 100);
 		return {
@@ -241,13 +242,13 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		});
 	}
 
-	function triggerCompaction(ctx: ExtensionContext, phase: AutoCompactPhase): boolean {
+	function triggerCompaction(ctx: ExtensionContext, phase: AutoCompactPhase, usage: UsageSnapshot): boolean {
 		if (pendingCompaction) return false;
 
 		pendingCompaction = true;
+		thresholdArmed = false;
 		triggerCount += 1;
 		lastTrigger = phase;
-		const usage = getUsage(ctx);
 		notify(
 			ctx,
 			`Auto-compact started (${phase}; ${formatTokens(usage.tokens)} / ${formatTokens(usage.contextWindow)} tokens, threshold ${formatPercent(usage.thresholdPercent)}).`,
@@ -266,6 +267,17 @@ export default function autoCompact(pi: ExtensionAPI): void {
 			onError: (error) => {
 				pendingCompaction = false;
 				const message = error instanceof Error ? error.message : String(error);
+				if (/already compacted/i.test(message)) {
+					notify(
+						ctx,
+						"Auto-compact skipped: session is already compacted. Will retry after usage drops below the threshold and crosses it again.",
+						"warning",
+					);
+					if (phase === "pre-turn" || phase === "mid-turn") {
+						autoContinueIfIdle(ctx, phase);
+					}
+					return;
+				}
 				notify(ctx, `Auto-compact failed: ${message}`, "error");
 			},
 		});
@@ -274,17 +286,21 @@ export default function autoCompact(pi: ExtensionAPI): void {
 	}
 
 	function maybeTrigger(ctx: ExtensionContext, phase: AutoCompactPhase): boolean {
-		if (!getConfig(ctx).enabled) return false;
+		if (pendingCompaction || !getConfig(ctx).enabled) return false;
 		const usage = getUsage(ctx);
-		if (usage.tokens === null || usage.tokens < usage.limit || pendingCompaction) return false;
-		return triggerCompaction(ctx, phase);
+		if (usage.tokens === null) return false;
+		if (usage.tokens < usage.limit) {
+			thresholdArmed = true;
+			return false;
+		}
+		if (!thresholdArmed) return false;
+		return triggerCompaction(ctx, phase, usage);
 	}
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		pendingCompaction = false;
-		lastKnownTokens = null;
+		thresholdArmed = true;
 		refreshConfig(ctx);
-		getUsage(ctx);
 
 		// If pi starts or resumes into an already-large session, compact before the
 		// next user turn. Skip brand-new sessions because they have no useful history.
@@ -293,15 +309,21 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("model_select", async (event) => {
+	pi.on("model_select", (event) => {
 		updateLimits(event.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+		thresholdArmed = true;
 	});
 
-	pi.on("turn_start", async (_event, ctx) => {
+	pi.on("session_compact", () => {
+		pendingCompaction = false;
+		thresholdArmed = false;
+	});
+
+	pi.on("turn_start", (_event, ctx) => {
 		maybeTrigger(ctx, "pre-turn");
 	});
 
-	pi.on("turn_end", async (event, ctx) => {
+	pi.on("turn_end", (event, ctx) => {
 		// Only compact mid-turn when the assistant just requested tools. If this is
 		// the final assistant answer, the next user turn's pre-turn check can compact
 		// without adding an unnecessary follow-up prompt.
@@ -361,6 +383,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 						`  Trigger at: ${formatTokens(usage.limit)} tokens\n` +
 						`  Usage: ${percent}\n` +
 						`  Pending: ${pendingCompaction}\n` +
+						`  Armed: ${thresholdArmed}\n` +
 						`  Trigger count: ${triggerCount}\n` +
 						`  Last trigger: ${lastTrigger ?? "never"}\n` +
 						`  Config: ${config.configPath}`,
