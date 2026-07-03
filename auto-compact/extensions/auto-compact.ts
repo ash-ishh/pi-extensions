@@ -313,7 +313,7 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		description: "Configure auto-compaction or show status",
 		getArgumentCompletions: (prefix) => {
 			const commands = ["on", "off", "status", "threshold", "reset"];
-			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value }));
+			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
 			return items.length > 0 ? items : null;
 		},
 		handler: async (args, ctx) => {

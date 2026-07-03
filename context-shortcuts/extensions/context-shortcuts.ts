@@ -369,7 +369,7 @@ export default function contextShortcuts(pi: ExtensionAPI): void {
 		description: "List configured @context shortcuts",
 		getArgumentCompletions: (prefix) => {
 			const commands = ["list"];
-			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value }));
+			const items = commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
 			return items.length > 0 ? items : null;
 		},
 		handler: async (_args, ctx) => {
